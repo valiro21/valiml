@@ -1,12 +1,9 @@
-import numba
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.ensemble import AdaBoostClassifier
-from sklearn.multiclass import OneVsRestClassifier
+from sklearn.utils import check_array, check_X_y
 
 from valiml.utils.numba_utils import create_progbar_numba
 
-from valiml.boosting.DecisionStump import DecisionStump
 from valiml.boosting.MulticlassDecisionStump import DecisionStumpSamme, DecisionStumpSammeR
 from valiml.optimizers import lm
 from sklearn.model_selection import train_test_split
@@ -17,29 +14,33 @@ from valiml.utils.utils import normalize
 
 
 class AdaBoost(BaseEstimator, ClassifierMixin):
-    def __init__(self, n_estimators=200, n_random_features=None, mode='exponential', type='discrete', verbose=False):
+    def __init__(self, n_estimators=200, n_random_features=None, mode='exponential', type='discrete',
+                 verbose=False, learning_rate=1.0, entropy_reg=0.1, valid_boost=0):
         self.n_estimators = n_estimators
         self.mode = mode
         self.n_random_features = n_random_features
         self.type = type
         self.verbose = verbose
-        
+        self.learninig_rate = learning_rate
+        self.entropy_reg = entropy_reg
+        self.valid_boost = valid_boost
+
         if self.mode == 'exponential':
             self._Z = 1
             
     def _get_weak_classifier(self, instance_importance, x, y):
         if self.n_labels > 2 and self.mode == 'exponential':
             if self.type == 'discrete':
-                return DecisionStumpSamme(n_random_features=self.n_random_features)\
-                    .fit(x, y, sample_weights=instance_importance)
+                return DecisionStumpSamme(n_random_features=self.n_random_features, alpha=self.entropy_reg)\
+                    .fit(x, y, sample_weight=instance_importance)
             else:
-                return DecisionStumpSammeR(n_random_features=self.n_random_features)\
+                return DecisionStumpSammeR(n_random_features=self.n_random_features, alpha=self.entropy_reg)\
                     .fit(x, y, sample_weight=instance_importance)
         elif self.n_labels > 2 and self.mode == 'quadratic':
-            return DecisionStump(n_random_features=self.n_random_features)\
+            return DecisionStumpSamme(n_random_features=self.n_random_features, alpha=self.entropy_reg)\
                 .fit(x, y, sample_weight=instance_importance)
         else:
-            return DecisionStump(n_random_features=self.n_random_features)\
+            return DecisionStumpSamme(n_random_features=self.n_random_features, alpha=self.entropy_reg)\
                 .fit(x, y, sample_weight=instance_importance)
             
     def _get_updated_instance_importance(self, instance_importance, weighted_error,
@@ -50,7 +51,7 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
                 if self.type == 'discrete':
                     return normalize(instance_importance * np.exp(missclassified_samples * alpha))
                 else:
-                    result = np.array([np.dot(self._y[idx], self._log_proba[idx]) for idx in range(self._y.shape[0])])
+                    result = np.array([np.dot(self._y[idx], self._log_proba[idx]) for idx in range(y.shape[0])])
                     return normalize(instance_importance * np.exp(-result * (self.n_labels - 1) / self.n_labels))
             else:
                 instance_importance[missclassified_samples] /= 2 * weighted_error
@@ -95,7 +96,9 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
     def _compute_loss(self, weighted_error, classifier_decision, y):
         if self.mode == 'exponential':
             if self.n_labels > 2:
-                return np.exp((-1 / self.n_labels) * (self._y * classifier_decision).sum(axis=1)).sum() / y.shape[0]
+                linear_combination = (self._y[:y.shape[0]] * classifier_decision[:y.shape[0]]).sum(axis=1)
+                linear_combination /= -self.n_labels
+                return np.exp(linear_combination).sum() / y.shape[0]
             if self.n_labels == 2:
                 self._Z *= 2 * np.sqrt(weighted_error * (1 - weighted_error))
                 return self._Z
@@ -112,6 +115,18 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
         :param X: features
         :param Y: labels
         """
+        X, Y = check_X_y(X, Y, multi_output=False, y_numeric=True, estimator='AdaBoost')
+
+        check_array(X, accept_sparse=False, dtype='numeric', force_all_finite=True, estimator='AdaBoost')
+        check_array(Y, accept_sparse=False, dtype='numeric', force_all_finite=True, ensure_2d=False,
+                    estimator='AdaBoost')
+
+        if self.valid_boost > 0:
+            indexes = np.arange(X.shape[0])
+            np.random.shuffle(indexes)
+            X = X[indexes, :]
+            Y = Y[indexes]
+
         if self.n_random_features is None:
             self.n_random_features = X.shape[1]
 
@@ -119,7 +134,7 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
             metrics = ['w_err', 'loss', 'err', 'acc']
             if validation_split is not None:
                 metrics.append('val_acc')
-            self._bar = create_progbar_numba(self.n_estimators, stateful_metrics="|".join(metrics))
+            _bar = create_progbar_numba(self.n_estimators, stateful_metrics="|".join(metrics))
 
         if validation_split is not None:
             if isinstance(validation_split, tuple):
@@ -143,7 +158,7 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
         else:
             classifier_decision = np.zeros((X.shape[0],))
             if validation_split is not None:
-                validation_split = np.zeros((x_test.shape[0],))
+                validation_decision = np.zeros((x_test.shape[0],))
 
         if self.n_labels > 2 and self.mode == 'exponential':
             self._y = np.zeros((Y.shape[0], self.n_labels))
@@ -154,29 +169,69 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
             Y = 2 * Y
 
         n_iter = 1
+
+        used_samples = X.shape[0]
+        if self.valid_boost:
+            used_samples = int(X.shape[0] / 2)
+            self.instance_importance[:used_samples] *= 2
+
         while n_iter <= self.n_estimators:
-            decision_stump = self._get_weak_classifier(self.instance_importance, X, Y)
-            stump_prediction = decision_stump.predict(X)
-            weighted_error = self.instance_importance[stump_prediction != Y].sum()
+            if self.valid_boost and n_iter <= self.valid_boost * self.n_estimators:
+                max_iter = self.n_estimators * self.valid_boost
+                t = int(X.shape[0] / 2 + int((np.log(n_iter) / np.log(max_iter)) * X.shape[0] / 2))
+
+                if t - used_samples > 0:
+                    self.instance_importance[:used_samples] *= used_samples / t
+
+                    misclassified = self._predict(classifier_decision[used_samples:t]) != Y[used_samples:t]
+                    n_misclassified = misclassified.sum()
+                    if n_misclassified:
+                        p = 1 / (2 * n_misclassified)
+                        self.instance_importance[used_samples:t][misclassified] = p
+                    if t - used_samples - n_misclassified:
+                        p = 1 / (2 * (t - used_samples - n_misclassified))
+                        self.instance_importance[used_samples:t][~misclassified] = p
+                    self.instance_importance[used_samples:t] *= (t - used_samples) / t
+
+                    self._y[:used_samples] *= used_samples / t
+                    self._y[used_samples:t] *= (t - used_samples) / t
+
+                used_samples = t
+
+            decision_stump = self._get_weak_classifier(self.instance_importance[:used_samples],
+                                                       X[:used_samples, :],
+                                                       Y[:used_samples])
+            stump_prediction = decision_stump.predict(X[:used_samples, :])
+            weighted_error = self.instance_importance[:used_samples][stump_prediction != Y[:used_samples]].sum()
 
             if weighted_error == 0:
                 self.decision_stumps.append((1.0, decision_stump))
+                if self.verbose:
+                    values = [0, 0, 0, 1]
+
+                    _bar.update(
+                        self.n_estimators,
+                        "|".join(metrics),
+                        values
+                    )
+
                 break
-            elif weighted_error == 0.5 and self.n_labels <= 2:
+            elif weighted_error >= 0.5 and self.n_labels <= 2:
                 break
 
             stump_decision = decision_stump.decision_function(X)
             if self.n_labels > 2 and self.mode == 'exponential' and self.type != 'discrete':
-                self._log_proba = np.log(decision_stump.predict_proba(X))
+                self._log_proba = np.log(decision_stump.predict_proba(X[:used_samples]))
 
             self.weighted_errors.append(weighted_error)
 
-            alpha = self._get_alpha(n_iter,
-                                    self.instance_importance,
+            alpha = self.learninig_rate *\
+                    self._get_alpha(n_iter,
+                                    self.instance_importance[:used_samples],
                                     weighted_error,
-                                    stump_decision,
-                                    classifier_decision,
-                                    Y)
+                                    stump_decision[:used_samples],
+                                    classifier_decision[:used_samples],
+                                    Y[:used_samples])
             if not (self.n_labels > 0 and self.mode == 'quadratic'):
                 assert alpha >= 0
             self.decision_stumps.append((alpha, decision_stump))
@@ -193,16 +248,16 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
             if validation_split is not None:
                 self.validation_errors.append(validation_error)
 
-            self.instance_importance = self._get_updated_instance_importance(
-                self.instance_importance,
+            self.instance_importance[:used_samples] = self._get_updated_instance_importance(
+                self.instance_importance[:used_samples],
                 weighted_error,
                 alpha,
-                stump_prediction,
-                classifier_decision,
-                Y
+                stump_prediction[:used_samples],
+                classifier_decision[:used_samples],
+                Y[:used_samples]
             )
 
-            loss = self._compute_loss(weighted_error, classifier_decision, Y)
+            loss = self._compute_loss(weighted_error, classifier_decision, Y[:used_samples])
             self.losses.append(loss)
             if self.verbose:
                 values = [
@@ -212,12 +267,11 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
                     1 - classifier_error
                 ]
                 if validation_split is not None:
-                    values.append(validation_error)
                     values.append(1 - validation_error)
 
-                self._bar.update(
+                _bar.update(
                     n_iter,
-                    "|".join(metrics) + "" if validation_split is None else "|val_err|val_acc",
+                    "|".join(metrics),
                     values
                 )
 

@@ -5,15 +5,18 @@ from numba import prange
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.utils import check_X_y
 
 from valiml.utils.numba_utils import create_progbar_numba
 
 
 @numba.jit(nopython=True, parallel=True)
-def optimize(X, y, alpha, max_iters):
+def optimize(X, y, alpha, max_iters, verbose):
     t = 0
     w = np.zeros((X.shape[1] + 1,), dtype=np.float32)
-    bar = create_progbar_numba(max_iters)
+
+    if verbose == 1:
+        bar = create_progbar_numba(max_iters)
     for n_iter in range(max_iters):
         for idx in range(X.shape[0]):
             t += 1
@@ -22,7 +25,9 @@ def optimize(X, y, alpha, max_iters):
                 w[1:] -= lr * (alpha * w[1:] - y[idx] * X[idx])
             else:
                 w[1:] -= lr * alpha * w[1:]
-        bar.add(1)
+
+        if verbose == 1:
+            bar.add(1)
     return w
 
 
@@ -38,10 +43,12 @@ def make_compute_kernel_matrix(kernel):
 
 
 @numba.jit(nopython=True, parallel=True)
-def optimize_kernel(X, y, alpha, max_iters, kernel_matrix):
+def optimize_kernel(X, y, alpha, max_iters, kernel_matrix, verbose):
     t = 0
     a = np.zeros((X.shape[0]), dtype=np.float32)
-    bar = create_progbar_numba(max_iters)
+
+    if verbose == 1:
+        bar = create_progbar_numba(max_iters)
     for n_iter in range(max_iters):
         for idx in range(X.shape[0]):
             t += 1
@@ -50,7 +57,9 @@ def optimize_kernel(X, y, alpha, max_iters, kernel_matrix):
             value = lr * y[idx] * (a * y * kernel_matrix[idx, :]).sum()
             if value < 1:
                 a[idx] = a[idx] + 1
-        bar.add(1)
+
+        if verbose == 1:
+            bar.add(1)
     return a
 
 
@@ -93,13 +102,15 @@ class HingeSVM(BaseEstimator, ClassifierMixin):
         self.gamma = gamma
 
     def fit(self, X, y):
+        X, y = check_X_y(X, y, multi_output=False, y_numeric=True, estimator='AdaBoost')
+
         self.coef_ = np.zeros((1, X.shape[1]))
         self.intercept_ = np.zeros((1, 1))
 
         X = X.astype('float32')
         y = 2 * y - 1
         if self.kernel == 'linear':
-            w = optimize(X, y, self.alpha, self.max_iters)
+            w = optimize(X, y, self.alpha, self.max_iters, self.verbose)
 
             self.intercept_[0] = w[0]
             self.coef_[:] = w[1:]
@@ -112,7 +123,7 @@ class HingeSVM(BaseEstimator, ClassifierMixin):
             kernel = make_rbf(self.gamma)
             kernel_matrix = np.zeros((X.shape[0], X.shape[0]), dtype='float32')
             make_compute_kernel_matrix(kernel)(X, kernel_matrix)
-            self.a = optimize_kernel(X, y, self.alpha, self.max_iters, kernel_matrix) * y
+            self.a = optimize_kernel(X, y, self.alpha, self.max_iters, kernel_matrix, self.verbose) * y
             self.X_train = X
 
         return self

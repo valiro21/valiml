@@ -286,7 +286,7 @@ class ProgressBar:
                 characters_printed += print_float(avg, 4)
         else:
             characters_printed += print_string(' ')
-            characters_printed += print_float(metric_sum, 8)
+            characters_printed += print_float(metric_sum, 4)
         return characters_printed
 
     def print_metrics(self):
@@ -340,3 +340,7 @@ def create_progbar_numba(target, width=30, verbose=1, interval=0.05, stateful_me
         stateful_metrics,
         dynamic_display
     )
+
+@numba.jit(nopython=True)
+def entropy(x):
+    return -(x * np.log(x)).sum()

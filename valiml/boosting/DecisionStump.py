@@ -28,6 +28,7 @@ def fit_stump(X, Y, feature_ids, sample_weights=None):
             if x[idx] != x[idx - 1]:
                 margin = sample_distribution[-1] - 2 * sample_distribution[idx - 1]
                 weighted_error = 0.5 - np.abs(margin) / 2
+
                 if weighted_error < best_weighted_error:
                     split_value = x[idx - 1] + (x[idx] - x[idx - 1]) / 2
                     label = 1 if margin < 0 else -1
@@ -51,7 +52,8 @@ class DecisionStump(BaseEstimator, ClassifierMixin):
 
     def fit(self, X, y, sample_weight=None):
         if self.n_random_features is not None:
-            features_subset = np.random.choice(X.shape[1], self.n_random_features, replace=False)
+            n_random_features = min(self.n_random_features, X.shape[1])
+            features_subset = np.random.choice(X.shape[1], n_random_features, replace=False)
         else:
             features_subset = list(range(X.shape[1]))
 

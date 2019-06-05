@@ -1,6 +1,31 @@
-#include <sys/time.h>
 #include <stdio.h>
 #include <math.h>
+
+#if defined(_WIN64) || defined(_WIN32)
+#include <Windows.h>
+#include <Winsock.h>
+#include <stdint.h> // portable: uint64_t   MSVC: __int64
+
+int gettimeofday(struct timeval * tp, struct timezone * tzp)
+{
+    static const uint64_t EPOCH = ((uint64_t) 116444736000000000ULL);
+
+    SYSTEMTIME  system_time;
+    FILETIME    file_time;
+    uint64_t    time;
+
+    GetSystemTime( &system_time );
+    SystemTimeToFileTime( &system_time, &file_time );
+    time =  ((uint64_t)file_time.dwLowDateTime )      ;
+    time += ((uint64_t)file_time.dwHighDateTime) << 32;
+
+    tp->tv_sec  = (long) ((time - EPOCH) / 10000000L);
+    tp->tv_usec = (long) (system_time.wMilliseconds * 1000);
+    return 0;
+}
+#else
+#include <sys/time.h>
+#endif
 
 double get_seconds_since_epoch() {
     struct timeval tv;
@@ -121,7 +146,7 @@ void print_remaining(int current, int target, int prev_total_width, int total_wi
         print_char_repeat(' ', prev_total_width - total_width);
 
         if(target != -1 && current >= target) {
-            printf("\n");
+            printf("\n\n");
         }
     }
 
