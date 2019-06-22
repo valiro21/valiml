@@ -7,6 +7,7 @@ from sklearn.model_selection import train_test_split
 
 
 # TODO: Think of a way to use inheritance for multiple modes
+from valiml.optimizers import lm
 from valiml.utils import create_progbar, normalize
 
 
@@ -44,20 +45,37 @@ def get_train_and_validation(x_train, y_train, validation_split):
 
 class AdaBoost(BaseEstimator, ClassifierMixin):
     def __init__(self, base_estimator=None, n_estimators=200, algorithm='SAMME',
-                 verbose=False, learning_rate=1.0, valid_boost=0):
+                 verbose=False, learning_rate=1.0, valid_boost=0, loss='exponential'):
         self.n_estimators = n_estimators
         self.verbose = verbose
         self.learning_rate = learning_rate
         self.algorithm = algorithm
         self.base_estimator = base_estimator
         self.valid_boost = valid_boost
+        self.loss = loss
         self.initialize()
 
-    def _get_alpha(self, weighted_error):
+    def _get_alpha(self, classifier_decision, y, stump_decision, weighted_error):
         if self.algorithm == 'SAMME.R':
             return 1
         elif self.algorithm == 'SAMME':
-            return np.log((1 - weighted_error) / weighted_error) + np.log(self.n_labels - 1)
+            if self.loss == 'exponential':
+                return np.log((1 - weighted_error) / weighted_error) + np.log(self.n_labels - 1)
+            elif self.loss == 'logit':
+                n_labels = self.n_labels
+
+                def _logit(alpha, jacobian=True):
+                    f = classifier_decision + alpha * stump_decision
+                    exponential = np.exp(-(f * y).sum(axis=1) / n_labels)
+                    loss = np.log(1 + exponential)
+
+                    if jacobian:
+                        derivative = -(1 - 1 / (1 + exponential)) * (y * stump_decision).sum(axis=1) / n_labels
+                        return np.array([loss.mean()]), np.array([derivative.mean()])
+                    return np.array([loss.mean()])
+
+                alpha, loss = lm(np.array([0]), _logit, max_iters=1000, alpha=1e-5)
+                return alpha[0]
 
     def initialize(self):
         self.validation_errors = None
@@ -68,8 +86,11 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
         self.estimators = []
         
     def _compute_loss(self, classifier_decision, y):
-        return np.exp(-classifier_decision * y / self.n_labels).sum() / y.shape[0]
-    
+        if self.loss == 'exponential':
+            return np.exp(-(classifier_decision * y).sum(axis=1) / self.n_labels).mean()
+        elif self.loss == 'logit':
+            return np.log(1 + np.exp(-(classifier_decision * y).sum(axis=1) / self.n_labels)).mean()
+
     def fit(self, X, y, validation_split=None):
         """
         :param x_train: features
@@ -92,7 +113,7 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
             _bar = create_progbar(self.n_estimators, stateful_metrics=metrics)
 
         self.n_labels = len(np.unique(y_train))
-        one_hot_encoded_labels = one_hot_encode_samme(y_train, self.n_labels)
+        y_encoded = one_hot_encode_samme(y_train, self.n_labels)
         sample_weight = np.ones(x_train.shape[0]) / x_train.shape[0]
         classifier_decision = np.zeros((x_train.shape[0], self.n_labels))
         if validation_split is not None:
@@ -148,7 +169,10 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
 
             self.weighted_errors.append(weighted_error)
 
-            alpha = self.learning_rate * self._get_alpha(weighted_error)
+            alpha = self.learning_rate * self._get_alpha(classifier_decision[:used_samples],
+                                                         y_encoded[:used_samples, :],
+                                                         decision_train[:used_samples],
+                                                         weighted_error)
             assert alpha >= 0
 
             self.estimators.append((alpha, estimator))
@@ -162,14 +186,18 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
                 self.validation_errors.append(validation_error)
 
             if self.algorithm == 'SAMME':
-                sample_weight[:used_samples] *= np.exp(errors * alpha)
+                if self.loss == 'exponential':
+                    sample_weight[:used_samples] *= np.exp(errors * alpha)
+                elif self.loss == 'logit':
+                    interim = (classifier_decision[:used_samples] * y_encoded[:used_samples]).sum(axis=1)
+                    sample_weight[:used_samples] = (1 - 1 / (1 + np.exp(-interim / self.n_labels))) / self.n_labels
             elif self.algorithm == 'SAMME.R':
-                result = one_hot_encoded_labels[:used_samples] * np.log(proba_train[:used_samples])
+                result = y_encoded[:used_samples] * np.log(proba_train[:used_samples])
                 result *= -(self.n_labels - 1) / self.n_labels
                 sample_weight[:used_samples] *= np.exp(result.sum(axis=1))
             sample_weight[:used_samples] = normalize(sample_weight[:used_samples])
 
-            self.losses.append(self._compute_loss(classifier_decision, one_hot_encoded_labels[:used_samples]))
+            self.losses.append(self._compute_loss(classifier_decision, y_encoded[:used_samples]))
 
             if self.verbose:
                 values = {
@@ -230,5 +258,11 @@ if __name__ == '__main__':
     x_train = x_train.reshape(x_train.shape[0], -1)
     x_test = x_test.reshape(x_test.shape[0], -1)
 
-    b = AdaBoost(base_estimator=DecisionStump(n_random_features=5, reg_entropy=0), n_estimators=400, verbose=True, algorithm='SAMME.R')
+    b = AdaBoost(
+        base_estimator=DecisionStump(n_random_features=10, reg_entropy=0.01),
+        loss='logit',
+        n_estimators=400,
+        verbose=True,
+        algorithm='SAMME'
+    )
     b.fit(x_train, y_train, validation_split=(x_test, y_test))
