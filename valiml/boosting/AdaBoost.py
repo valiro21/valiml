@@ -2,7 +2,6 @@ import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.metrics import accuracy_score
 from sklearn.utils import check_array, check_X_y
-from valiml.boosting import DecisionStump
 from sklearn.model_selection import train_test_split
 
 
@@ -11,12 +10,24 @@ from valiml.optimizers import lm
 from valiml.utils import create_progbar, normalize
 
 
+def solve_cubic(alpha):
+    tmp = 3 * np.sqrt(3) * np.sqrt(27 * alpha**2 + 14 * alpha + 3)
+    tmp = np.cbrt(tmp - 27 * alpha - 7)
+
+    root = tmp / (3 * np.cbrt(2))
+    root -= (2 * np.cbrt(2)) / (3 * tmp)
+    root += 1/3
+
+    return root
+
+
 def make_prediction_sammer(estimator, X, n_labels):
     estimator_proba = estimator.predict_proba(X)
     np.clip(estimator_proba, np.finfo(estimator_proba.dtype).eps, None, out=estimator_proba)
     log_proba = np.log(estimator_proba)
+    normalizer = log_proba.sum(axis=1)[:, np.newaxis]
 
-    estimator_decision = (log_proba - (1. / n_labels) * log_proba.sum(axis=1)[:, np.newaxis])
+    estimator_decision = log_proba - (1. / n_labels) * normalizer
     estimator_decision *= n_labels - 1
 
     estimator_prediction = estimator_decision.argmax(axis=1)
@@ -143,6 +154,7 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
 
             estimator = clone(self.base_estimator).fit(x_train[:used_samples], y_train[:used_samples],
                                                        sample_weight=sample_weight[:used_samples])
+
             if self.algorithm == 'SAMME':
                 prediction_train = estimator.predict(x_train)
                 decision_train = one_hot_encode_samme(prediction_train, self.n_labels)
@@ -150,7 +162,9 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
                 prediction_test = estimator.predict(x_test)
                 decision_test = one_hot_encode_samme(prediction_test, self.n_labels)
             elif self.algorithm == 'SAMME.R':
-                proba_train, decision_train, prediction_train = make_prediction_sammer(estimator, x_train, self.n_labels)
+                proba_train, decision_train, prediction_train = make_prediction_sammer(estimator,
+                                                                                       x_train,
+                                                                                       self.n_labels)
                 _, decision_test, _ = make_prediction_sammer(estimator, x_test, self.n_labels)
 
             errors = prediction_train[:used_samples] != y_train[:used_samples]
@@ -192,9 +206,13 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
                     interim = (classifier_decision[:used_samples] * y_encoded[:used_samples]).sum(axis=1)
                     sample_weight[:used_samples] = (1 - 1 / (1 + np.exp(-interim / self.n_labels))) / self.n_labels
             elif self.algorithm == 'SAMME.R':
-                result = y_encoded[:used_samples] * np.log(proba_train[:used_samples])
-                result *= -(self.n_labels - 1) / self.n_labels
-                sample_weight[:used_samples] *= np.exp(result.sum(axis=1))
+                if self.loss == 'exponential':
+                    result = y_encoded[:used_samples] * np.log(proba_train[:used_samples])
+                    result *= -(self.n_labels - 1) / self.n_labels
+                    sample_weight[:used_samples] *= np.exp(result.sum(axis=1))
+                else:
+                    fy = (classifier_decision[:used_samples] * y_encoded).sum(axis=1)
+                    sample_weight[:used_samples] = np.log(1 + np.exp(- (1 / self.n_labels) * fy))
             sample_weight[:used_samples] = normalize(sample_weight[:used_samples])
 
             self.losses.append(self._compute_loss(classifier_decision, y_encoded[:used_samples]))
@@ -240,29 +258,20 @@ class AdaBoost(BaseEstimator, ClassifierMixin):
         return decision.argmax(axis=1)
 
     def predict_proba(self, X):
-        prediction = self.decision_function(X)
-        prediction /= self.n_labels
-        prediction = np.exp((1. / (self.n_labels - 1)) * prediction)
+        if self.loss == 'exponential':
+            prediction = self.decision_function(X)
+            prediction /= self.n_labels
+            prediction = np.exp((1. / (self.n_labels - 1)) * prediction)
 
-        normalizer = prediction.sum(axis=1)[:, np.newaxis]
-        normalizer[normalizer == 0.0] = 1.0
-        prediction /= normalizer
-        return prediction
-
-
-if __name__ == '__main__':
-    from keras.datasets import mnist
-
-    (x_train, y_train), (x_test, y_test) = mnist.load_data()
-
-    x_train = x_train.reshape(x_train.shape[0], -1)
-    x_test = x_test.reshape(x_test.shape[0], -1)
-
-    b = AdaBoost(
-        base_estimator=DecisionStump(n_random_features=10, reg_entropy=0.01),
-        loss='logit',
-        n_estimators=400,
-        verbose=True,
-        algorithm='SAMME'
-    )
-    b.fit(x_train, y_train, validation_split=(x_test, y_test))
+            normalizer = prediction.sum(axis=1)[:, np.newaxis]
+            normalizer[normalizer == 0.0] = 1.0
+            prediction /= normalizer
+            return prediction
+        elif self.loss == 'logit':
+            prediction = self.decision_function(X)
+            prediction /= self.n_labels - 1
+            prediction = np.exp(prediction) + 1
+            normalizer = prediction.sum(axis=1)[:, np.newaxis]
+            normalizer[normalizer == 0.0] = 1.0
+            prediction /= normalizer
+            return prediction
