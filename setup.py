@@ -12,7 +12,7 @@ with open('requirements.txt') as f:
 
 setup(
     name="valiml",
-    version="0.1.16",
+    version="0.1.17",
     description="Extension of sklearn with tweaked implementation of common machine learning algorithms for self-use.",
     license="MIT",
     author="Valentin-Bogdan Rosca",
