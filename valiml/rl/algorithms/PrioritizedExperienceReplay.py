@@ -7,7 +7,7 @@ class PrioritizedExperienceReplay(object):
 
     def train(self, agent, prioritized_memory, batch_size=20):
         if len(prioritized_memory) < batch_size:
-            return
+            return None, None
 
         rewards = []
         inputs = []

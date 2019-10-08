@@ -51,3 +51,6 @@ class DQN(QLearningAgent):
 
     def clone(self):
         return clone_model(self.inference_model)
+
+    def episode_end(self):
+        pass

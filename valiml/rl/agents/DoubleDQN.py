@@ -2,10 +2,11 @@ import numpy as np
 
 from valiml.rl.agents.DQN import DQN
 
+
 class DoubleDQN(DQN):
     def __init__(self, training_model, inference_model, gamma=0.95, polyak_coef=0.01, shift_episodes=1):
         super(DoubleDQN, self).__init__(training_model, inference_model, gamma=gamma)
-        self.target_model = inference_model.clone()
+        self.target_model = self.clone()
         self.polyak_coef = polyak_coef
         self.shift_episodes = shift_episodes
 
