@@ -22,7 +22,7 @@ class PrioritizedExperienceReplay(object):
 
             prioritized_memory.priority_update(idx, np.abs(q_diff))
 
-            priority = prioritized_memory.get_priority(idx)
+            priority = prioritized_memory.get_normalized_priority(idx)
             w = np.power((1 / len(prioritized_memory)) * (1 / priority), self.beta)
 
             rewards.append(reward)

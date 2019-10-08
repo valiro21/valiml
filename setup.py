@@ -14,7 +14,7 @@ setup(
     name="valiml",
     author='Valentin-Bogdan Rosca',
     author_email='rosca.valentin2012@gmail.com',
-    version="0.1.19",
+    version="0.1.20",
     description="Extension of sklearn with tweaked implementation of common machine learning algorithms for self-use.",
     license="MIT",
     packages=find_packages(),
